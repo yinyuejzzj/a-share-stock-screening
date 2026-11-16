@@ -1,61 +1,90 @@
-# A 股选股与信号研究工具
+# A股筛选方法与交易策略整理：Python实现与本地使用
 
-四组 Python 工具：尾盘条件筛选、本地预测模型、EMA 均线判断、跳空高开筛选。用于研究不同规则如何改变候选清单，提供可修改参数和强限制、标准、弱限制三个参考版本。
+将几类 A 股筛选思路整理成可修改参数、在本地运行的 Python 工具。重点记录策略条件、代码实现和使用方法，另附部分技术条件的通达信选股公式，便于在券商软件中建立初筛清单。
 
-这些档位是便于比较的参数起点，没有经过独立样本验证为最优。强限制意味着部分条件更收紧，不意味着收益更高或风险更低。程序不自动交易。
+## 策略介绍
 
-## 包含内容
+| 方法 | 筛选思路 | Python 实现 | 使用说明 |
+|---|---|---|---|
+| **尾盘趋势与活跃度筛选** | 涨幅、市值、量比、换手、涨幅日历史、均线与分时条件过滤，再按规则和板块信息排序 | [核心模块](tail_screen/wei_pan_core) / [命令行入口](tail_screen/wei_pan_cli.py) | [尾盘使用说明](tail_screen/README.md) |
+| **本地技术指标模型** | 固定随机森林按时间顺序验证，再用概率门槛筛选；原九条件筛选及自动模型源码另存实验目录 | [模型入口](local_model/cli.py) / [原实验代码](local_model/experimental) | [模型与原九条件筛选说明](local_model/README.md) |
+| **EMA 趋势中的缩量回踩** | 判断向上趋势中价格是否接近 EMA、成交量是否收缩，同时提示破位、乖离和震荡状态 | [EMA 判断代码](ema/ema20_judge.py) | [EMA 使用说明](ema/README.md) |
+| **跳空高开筛选** | 开盘严格突破上一交易日最高价，再叠加市值、PB、非 ST/退市及正成交量条件 | [跳空筛选代码](gap_screen/screen_gapup.py) | [跳空使用说明](gap_screen/README.md) |
 
-| 模块 | 入口 | 功能与范围 |
-|---|---|---|
-| [尾盘筛选](tail_screen/README.md) | `tail_screen/wei_pan_cli.py` | 市值、涨幅、量比、换手、涨停窗口、均线和分时条件，规则评分输出候选清单 |
-| [本地模型](local_model/README.md) | 详见模块说明 | 指标计算、时序划分训练和实验模型源码 |
-| [EMA 判断](ema/README.md) | `ema/ema20_judge.py` | 均线附近缩量回踩、量能及震荡提示 |
-| [跳空高开](gap_screen/README.md) | `gap_screen/screen_gapup.py` | 开盘突破上一交易日最高价，叠加市值与 PB 过滤 |
+[策略与交易规则详解](docs/strategies.md)介绍每类方法的信号、参数取舍、结果阅读方式和适用边界。筛选信号不等于成交指令；程序不自动交易，参数版本也未经收益优化。
 
-## 安装与运行
+## Python 实现与本地使用
 
-建议 Python 3.10+，在仓库根目录建立虚拟环境：
+建议 Python 3.10+。下载仓库并进入根目录，在 Windows PowerShell 运行：
 
-```bash
+```powershell
 python -m venv .venv
-# Windows PowerShell
-.venv/Scripts/Activate.ps1
-python -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-先查看配置，再运行筛选：
+以下命令直接调用虚拟环境 Python，无需先激活环境。在线取数依赖行情服务，当天日线可能尚未收盘；历史研究应手动指定已收盘日。
 
-```bash
-python tail_screen/wei_pan_cli.py --profile strict --show-config
-python gap_screen/screen_gapup.py --profile standard --show-config
-python ema/ema20_judge.py --help
+### 尾盘：先看参数，再用少量代码检查取数
+
+```powershell
+.venv\Scripts\python.exe tail_screen/wei_pan_cli.py --profile standard --mode B --show-config
+.venv\Scripts\python.exe tail_screen/wei_pan_cli.py --profile strict --mode B --codes 000001,600000 --format both
 ```
 
-依赖范围是安装起点，不是所有组合都经验证；网络接口与字段可能变化。可先运行离线示例检查环境：
+输出本地 Markdown/HTML 候选报告，附生效阈值及规则说明。`--mode A/B/C` 控制时间窗口和附加形态，`--profile` 控制参数档位，两者分开选择。此入口使用最新快照，不能把 `--date` 改成过去日期来回测。
 
-```bash
-python gap_screen/screen_gapup.py --date 2026-09-28 --snapshot examples/gap_snapshot.csv --bars examples/gap_bars.csv --profile relaxed --out outputs/gap_demo.csv
-python -m unittest discover -s tests -v
-python -m unittest local_model.test_offline -v
+### 本地模型：指定股票、历史窗口和预测步长
+
+```powershell
+.venv\Scripts\python.exe -m local_model.cli --code 000001 --days 1500 --forward-days 3 --profile standard --output outputs/model_result.json
 ```
 
-`examples/` 中的样例为合成数据，不能当作历史选股结果。
+输出实际行情截止日、时间顺序留出验证指标、模型概率及是否达到门槛。也可用 `--csv` 提供单股票日线、`--end-date` 指定截止日；CSV 格式见 [模块说明](local_model/README.md)。默认入口是简化研究基线；原九条件规则与自动模型保留在 `experimental/`，使用方式和限制单独说明。
 
-## 哪些条件和日期可以修改
+### EMA：查看缩量回踩及辅助提示
 
-各模块说明均给出：真实生效的参数名、单位、默认值、三档建议、命令行覆盖方法和日期限制。汇总见 [参数与日期指南](docs/parameters.md)。
+```powershell
+.venv\Scripts\python.exe ema/ema20_judge.py 000001 --profile standard --history-days 120
+.venv\Scripts\python.exe ema/ema20_judge.py 000001 --profile strict --as-of 2026-09-28 --history-days 120 --style short
+```
 
-- **筛选档位**：`strict`（强限制）、`standard`（标准）、`relaxed`（弱限制）。不同模块的档位针对不同信号，不能跨模块当作统一风险等级。
-- **日期**：日期参数不会凭空提供历史估值、历史股票池或历史分钟行情。最新行情筛选与按历史截止日计算分别处理，具体支持范围以模块说明为准。
-- **输出**：运行结果、行情缓存、模型文件和日志在本地生成，不提交到仓库。
+默认只使用日线，报告保存在 `ema/`；`--out` 可改路径。`--as-of` 指定日线截止日，`--style` 控制乖离和破线提示，与三档筛选参数独立。
 
-## 验证范围与局限
+### 跳空：先用离线样例，再选择最新行情
 
-本仓库不宣称具备实盘验证过的胜率、收益率或无前视偏差的完整回测。离线测试用于检查参数切换、日期边界和核心规则，不验证投资效果，也不保证第三方行情接口一直可用。
+```powershell
+.venv\Scripts\python.exe gap_screen/screen_gapup.py --date 2026-09-28 --snapshot examples/gap_snapshot.csv --bars examples/gap_bars.csv --profile relaxed --out outputs/gap_demo.csv
+.venv\Scripts\python.exe gap_screen/screen_gapup.py --live --profile standard --codes 000001,600000
+```
 
-已完成一次按“复现 → 根因 → 回归测试 → 最小修复”执行的代码复查，具体问题和验证边界见 [系统检查记录](docs/systematic-review.md)。EMA 默认仅使用日线，实时数据需显式开启。
+第一条使用合成数据，输出 CSV 与参数 JSON，适合检查安装。真实历史筛选必须提供同日估值快照和未复权日线；最新市值/PB不能冒充历史值。示例股票代码仅用于演示命令。
 
-若要比较档位效果，应固定股票池、样本区间和数据时点，按时间切分训练/验证/测试，计入手续费、滑点、涨跌停及停牌等不可成交情形；调参只使用训练/验证区间，保留独立测试区间。最新名单与最新估值不能直接代表历史时点。
+## 参数修改与推荐版本
 
-公开版本从本地研究代码整理，保留必要的模块逻辑，并在模块说明中列出公开入口与原实验代码的区别。仓库不包含 Rust 缠论引擎、加密货币交易工程、个人资料、原始截图或个人记忆文件。
+各模块都提供 `strict`（强限制）、`standard`（标准）、`relaxed`（弱限制）。它们是方便比较的参数起点，不是统一的风险等级；收紧条件也不保证收益更高。
+
+| 模块 | 三档主要改变什么 | 自定义方式 |
+|---|---|---|
+| 尾盘 | 涨幅、市值、量比、换手、涨幅日窗口、MA20 偏差、振幅门槛 | `config.py` 中 `SCREEN_PROFILES`，先用 `--show-config` 查看 |
+| 本地模型 | 模型概率门槛 0.65 / 0.60 / 0.55 | `--min-probability`；原九条件筛选的常量另见模块说明 |
+| EMA | 回踩容差 1% / 2% / 3%，缩量上限 0.65 / 0.80 / 0.95 | `SCREEN_PROFILES`；周期等参数在 `CONFIG` |
+| 跳空 | 市值区间、PB 上限、开盘超过昨高的幅度 | `--min-market-cap-yi`、`--max-market-cap-yi`、`--max-pb`、`--min-gap-pct` |
+
+[参数与日期指南](docs/parameters.md)列出字段名、单位、具体参考值和历史日期的支持范围。
+
+## 券商软件中的条件选股公式
+
+[通达信公式与对应 Python 计算](broker_formulas/README.md)提供 EMA 缩量回踩、跳空突破、尾盘日线技术初筛三类可复制公式，以及 CSV 离线计算入口。
+
+这部分用于快速初筛。尾盘分时和外盘判断、完整评分、财务条件、机器学习概率仍以原 Python 模块为准；公式与完整策略的差异逐项列在说明中。不同券商版本的数据、函数和 EMA 初始化口径可能不同，当前未在具体券商客户端完成兼容性验证。
+
+## 检查记录与使用边界
+
+```powershell
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+.venv\Scripts\python.exe -m unittest local_model.test_offline -v
+```
+
+[验证记录](docs/validation.md)与[系统检查记录](docs/systematic-review.md)说明已检查的行为和已修复的问题。源码测试、合成数据测试及公式结构检查不能证明策略收益，也不能替代真实客户端测试。
+
+仓库不包含个人资料、原始截图、行情/模型缓存或交易账户信息。运行输出和日志保存在本地。真实研究还需考虑数据修订、复权、历史股票池、交易费用、滑点及不可成交情形。

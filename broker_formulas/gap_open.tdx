@@ -1,0 +1,6 @@
+{Daily conditional selection. Use unadjusted daily prices.}
+{PROFILE: 1 strict, 2 standard, 3 relaxed. GAP uses percentage units.}
+PROFILE:=2;
+GAP:=IF(PROFILE=1,0.5,IF(PROFILE=2,0,0));
+VALIDP:=(PROFILE=1) OR (PROFILE=2) OR (PROFILE=3);
+XG:VALIDP AND BARSCOUNT(C)>=2 AND VOL>0 AND REF(H,1)>0 AND O>REF(H,1)*(1+GAP/100);
