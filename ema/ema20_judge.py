@@ -116,7 +116,38 @@ RISK_DISCLAIMER = (
 # =========================================================================
 # 数据获取区
 # =========================================================================
-def fetch_data(code: str, days: int = 60, realtime: bool = True, as_of: str = None) -> pd.DataFrame:
+def validate_daily(frame: pd.DataFrame) -> pd.DataFrame:
+    """验证日线边界，拒绝重复日期、非有限数值及不可能的 OHLC。volume 单位为手。"""
+    df = frame.copy()
+    if df.columns.duplicated().any():
+        raise ValueError("日线列名归一化后重复")
+    required = {"date", "open", "high", "low", "close", "volume"}
+    if required - set(df):
+        raise ValueError(f"日线缺少列: {sorted(required - set(df))}")
+    try:
+        df["date"] = pd.to_datetime(df["date"], errors="raise").dt.normalize()
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("日线日期无法解析或时区不一致") from exc
+    if df["date"].isna().any() or df["date"].duplicated().any():
+        raise ValueError("日线日期缺失或重复")
+    if "amount" not in df:
+        df["amount"] = 0.0
+    numeric = ["open", "high", "low", "close", "volume", "amount"]
+    for key in numeric:
+        df[key] = pd.to_numeric(df[key], errors="coerce")
+    if not np.isfinite(df[numeric].to_numpy()).all():
+        raise ValueError("日线包含缺失、非数字或非有限价格/成交数据")
+    if (df[["open", "high", "low", "close"]] <= 0).any().any():
+        raise ValueError("日线价格必须为正")
+    if (df[["volume", "amount"]] < 0).any().any():
+        raise ValueError("成交量和成交额不能为负")
+    if ((df["high"] < df[["open", "close", "low"]].max(axis=1)) |
+            (df["low"] > df[["open", "close", "high"]].min(axis=1))).any():
+        raise ValueError("日线 OHLC 高低价关系不成立")
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def fetch_data(code: str, days: int = 60, realtime: bool = False, as_of: str = None) -> pd.DataFrame:
     """获取 A 股日线数据（前复权），可选追加当日实时行情。
     取数失败抛 RuntimeError，绝不编造数据。
     """
@@ -130,6 +161,8 @@ def fetch_data(code: str, days: int = 60, realtime: bool = True, as_of: str = No
         raise ValueError("截止日不能晚于今天")
     if as_of:
         realtime = False  # 指定日期只使用截止日及以前的日线，不混入当前行情
+    adjustment = "" if realtime else "qfq"
+    source_is_shares = False
     end_date = cutoff.strftime("%Y%m%d")
     start_date = (cutoff - timedelta(days=days * 2)).strftime("%Y%m%d")
     print(f"正在获取 {code} 历史数据（{start_date} ~ {end_date}）...")
@@ -141,7 +174,7 @@ def fetch_data(code: str, days: int = 60, realtime: bool = True, as_of: str = No
         try:
             df = ak.stock_zh_a_hist(
                 symbol=code, period="daily",
-                start_date=start_date, end_date=end_date, adjust="qfq",
+                start_date=start_date, end_date=end_date, adjust=adjustment,
             )
             break
         except Exception as e:
@@ -154,7 +187,8 @@ def fetch_data(code: str, days: int = 60, realtime: bool = True, as_of: str = No
         print(f"  东方财富不可用({type(last_err).__name__})，尝试新浪数据源...")
         try:
             sina_code = f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
-            df = ak.stock_zh_a_daily(symbol=sina_code, adjust="qfq")
+            df = ak.stock_zh_a_daily(symbol=sina_code, adjust=adjustment)
+            source_is_shares = True
             if df is not None and not df.empty:
                 # 新浪返回英文列名，统一映射
                 df = df.rename(columns={
@@ -173,10 +207,19 @@ def fetch_data(code: str, days: int = 60, realtime: bool = True, as_of: str = No
         "最高": "high", "最低": "low", "成交量": "volume",
         "成交额": "amount", "涨跌幅": "pct_change",
     })
-    df["date"] = pd.to_datetime(df["date"])
+    if df.columns.duplicated().any():
+        raise ValueError("日线列名归一化后重复")
+    if "date" not in df:
+        raise ValueError("日线缺少 date 列")
+    df["date"] = pd.to_datetime(df["date"], errors="raise").dt.normalize()
+    if df["date"].isna().any():
+        raise ValueError("日线日期缺失")
     df = df[(df["date"] <= pd.Timestamp(cutoff.date())) &
             (df["date"] >= pd.Timestamp(start_date))]
-    df = df.sort_values("date").tail(days).reset_index(drop=True)
+    if source_is_shares and "volume" in df:
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce") / 100.0
+    df = validate_daily(df)
+    df = df.tail(days).reset_index(drop=True)
     if df.empty:
         raise RuntimeError("截止日及请求窗口内没有日线数据")
     if "pct_change" not in df.columns:
@@ -187,34 +230,23 @@ def fetch_data(code: str, days: int = 60, realtime: bool = True, as_of: str = No
     keep = ["date", "open", "close", "high", "low", "volume", "amount", "pct_change"]
     df = df[[c for c in keep if c in df.columns]]
 
-    # 追加当日实时行情
+    # 实时必须显式请求；历史以未复权口径匹配原始实时报价。
     if realtime:
-        today = datetime.now().date()
-        last_date = df["date"].iloc[-1].date()
-        if last_date < today:
-            print(f"  历史数据截止 {last_date}，获取今日实时行情...")
-            rt = get_realtime_quote(code)
-            if rt:
-                new_row = {
-                    "date": pd.to_datetime(rt["date"]),
-                    "open": rt["open"], "close": rt["price"],
-                    "high": rt["high"], "low": rt["low"],
-                    "volume": rt["volume"], "amount": rt["amount"],
-                    "pct_change": rt["pct_change"],
-                }
-                # 避免重复
-                if df["date"].iloc[-1] != new_row["date"]:
-                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                    print(f"  已追加实时行情：{rt['name']} 价格 {rt['price']:.2f}")
-                else:
-                    # 同日，更新最新一根
-                    df.loc[df.index[-1], "close"] = rt["price"]
-                    df.loc[df.index[-1], "high"] = max(df.loc[df.index[-1], "high"], rt["high"])
-                    df.loc[df.index[-1], "low"] = min(df.loc[df.index[-1], "low"], rt["low"])
-                    df.loc[df.index[-1], "volume"] = rt["volume"]
-                    print(f"  已更新今日实时：{rt['name']} 价格 {rt['price']:.2f}")
-            else:
-                print("  ⚠️ 实时行情获取失败，仅用历史数据判断")
+        rt = get_realtime_quote(code)
+        if not rt:
+            raise RuntimeError("实时行情不可用；请改用默认日线模式")
+        quote_date = pd.to_datetime(rt["date"], errors="raise").normalize()
+        today = pd.Timestamp(datetime.now().date())
+        if quote_date != today or quote_date < df["date"].iloc[-1]:
+            raise ValueError("实时报价不是今天或早于历史末日，拒绝追加旧/未来行情")
+        new_row = {"date": quote_date, "open": rt["open"], "close": rt["price"],
+                   "high": rt["high"], "low": rt["low"], "volume": rt["volume"],
+                   "amount": rt["amount"], "pct_change": rt["pct_change"]}
+        new_frame = validate_daily(pd.DataFrame([new_row]))
+        df = pd.concat([df[df["date"] != quote_date], new_frame], ignore_index=True)
+        df = validate_daily(df).tail(days).reset_index(drop=True)
+    if df["volume"].iloc[-1] <= 0:
+        raise ValueError("最新日线没有正成交量，拒绝生成规则信号")
 
     return df
 
@@ -245,7 +277,7 @@ def get_realtime_quote(code: str) -> dict:
                 "price": price,
                 "high": float(fields[4]),
                 "low": float(fields[5]),
-                "volume": float(fields[8]),
+                "volume": float(fields[8]) / 100.0,  # 新浪报价为股，统一为手
                 "amount": float(fields[9]),
                 "date": fields[30],
                 "time": fields[31],
@@ -527,7 +559,7 @@ def build_report(code: str, df: pd.DataFrame, primary: dict, confirmation: dict,
     lines.append(f"| MACD | DIF {dif:.3f} / DEA {dea:.3f} / 柱 {macd_bar:.3f} | DEA{'>' if dea>0 else '<'}0 即零轴{'上方' if dea>0 else '下方'} |")
     lines.append(f"| 日期 | {last['date'].strftime('%Y-%m-%d')} | 数据最新一日 |")
     lines.append("")
-    lines.append("> 数据来源：akshare 日线（前复权）；未指定截止日且未禁用实时数据时，可能追加新浪行情\n")
+    lines.append("> 数据来源：akshare 日线（前复权）；显式 --realtime 时使用未复权日线并追加今天新浪行情（成交量统一为手）\n")
     lines.append("")
 
     # 二、缩量回踩信号
@@ -633,7 +665,9 @@ def build_report(code: str, df: pd.DataFrame, primary: dict, confirmation: dict,
 def main():
     parser = argparse.ArgumentParser(description="EMA20 判断工具")
     parser.add_argument("code", help="6 位股票代码，如 600596")
-    parser.add_argument("--no-realtime", action="store_true", help="不取当日实时行情")
+    realtime_group = parser.add_mutually_exclusive_group()
+    realtime_group.add_argument("--realtime", action="store_true", help="显式使用未复权历史和今天实时报价；盘中结果仅供观察")
+    realtime_group.add_argument("--no-realtime", action="store_true", help="兼容旧参数；默认已经只使用日线")
     parser.add_argument("--out", default="", help="输出 Markdown 文件路径（默认同目录自动命名）")
     parser.add_argument("--history-days", "--days", dest="days", type=int,
                         default=CONFIG["HISTORY_DAYS"], help="最多保留的历史日线行数，默认60")
@@ -662,8 +696,8 @@ def main():
 
     # 1. 取数
     try:
-        df = fetch_data(code, days=args.days, realtime=not args.no_realtime, as_of=args.as_of)
-    except RuntimeError as e:
+        df = fetch_data(code, days=args.days, realtime=args.realtime, as_of=args.as_of)
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:
         print(f"❌ 取数失败：{e}")
         print("工具绝不编造数据，已终止。请检查网络/股票代码/akshare 安装。")
         sys.exit(2)
@@ -699,8 +733,13 @@ def main():
     import os
     script_dir = os.path.dirname(os.path.abspath(__file__))
     out_path = os.path.join(script_dir, out_path)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(report)
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(report)
+    except OSError as exc:
+        print(f"报告写入失败：{exc}")
+        sys.exit(4)
     print(f"\n✅ 报告已生成：{out_path}\n")
     print("=" * 60)
     print(report[:2000] + ("\n...（完整内容见文件）" if len(report) > 2000 else ""))

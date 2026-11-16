@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,9 @@ def fetch_sector_rankings(market_close_date: Optional[str] = None) -> Optional[p
     # 优先 akshare
     try:
         import akshare as ak
+        end = (datetime.strptime(market_close_date, "%Y-%m-%d").date()
+               if market_close_date else datetime.now(timezone(timedelta(hours=8))).date())
+        start = end - timedelta(days=40)
         # 行业板块实时行情（含当日涨跌幅）
         brd = ak.stock_board_industry_name_em()
         if brd is not None and len(brd) > 0:
@@ -43,17 +47,16 @@ def fetch_sector_rankings(market_close_date: Optional[str] = None) -> Optional[p
                     try:
                         hist = ak.stock_board_industry_hist_em(
                             symbol=sn, period="日",
-                            start_date=(market_close_date or "20260101").replace("-","")[:8],
-                            end_date=(market_close_date or "20261231").replace("-","")[:8],
+                            start_date=start.strftime("%Y%m%d"),
+                            end_date=end.strftime("%Y%m%d"),
                             adjust=""
                         )
-                        if hist is not None and len(hist) >= 5:
+                        if hist is not None and len(hist) >= 4:
                             closes = pd.to_numeric(hist["收盘"], errors="coerce").dropna().values
-                            if len(closes) >= 5:
+                            if len(closes) >= 4 and closes[-4] > 0:
                                 ret_3d[sn] = float((closes[-1] - closes[-4]) / closes[-4])
+                            if len(closes) >= 6 and closes[-6] > 0:
                                 ret_5d[sn] = float((closes[-1] - closes[-6]) / closes[-6])
-                            elif len(closes) >= 3:
-                                ret_3d[sn] = float((closes[-1] - closes[-3]) / closes[-3])
                     except Exception:
                         continue
             except Exception:

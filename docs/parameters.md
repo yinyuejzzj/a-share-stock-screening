@@ -49,7 +49,7 @@ python tail_screen/wei_pan_cli.py --profile relaxed --mode B --show-config
 
 在 `ema/ema20_judge.py` 的 `SCREEN_PROFILES` 中修改；`--style long/short` 单独控制乖离和破线提示，并非强弱档位。
 
-`--history-days 60/120/250` 控制最多保留的日线根数，不是自然日天数。EMA 周期可在 `CONFIG['EMA_PERIOD']` 试 10/20/30；改变周期也改变策略含义。具体触碰定义、当日均量口径和仅作为提示的参数见 [EMA 说明](../ema/README.md)。
+`--history-days 60/120/250` 控制最多保留的日线根数，不是自然日天数。默认只使用日线；`--realtime` 才显式追加今天的实时报价，成交量统一为手，历史改用未复权口径。盘中成交量尚未结束，不用于直接比较完整日线的缩量条件。EMA 周期可在 `CONFIG['EMA_PERIOD']` 试 10/20/30；改变周期也改变策略含义。具体触碰定义、当日均量口径和仅作为提示的参数见 [EMA 说明](../ema/README.md)。
 
 ## 4. 跳空高开
 

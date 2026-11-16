@@ -36,7 +36,26 @@ class GapTests(unittest.TestCase):
 
     def test_infinite_prices_do_not_create_signals(self):
         self.bars.loc[1, "open"] = float("inf")
-        self.assertIsNone(gap.gap_values(self.bars, "2026-09-28"))
+        with self.assertRaises(ValueError):
+            gap.gap_values(self.bars, "2026-09-28")
+
+    def test_impossible_ohlc_is_not_a_signal(self):
+        self.bars.loc[1, "open"] = 99
+        with self.assertRaises(ValueError):
+            gap.gap_values(self.bars, "2026-09-28")
+
+    def test_bad_snapshot_identity_or_volume_rejected(self):
+        for key, value in (("name", None), ("code", "bad"), ("volume", float("inf"))):
+            row = {"code": "000001", "name": "synthetic", "market_cap": 5e9,
+                   "pb": 2, "volume": 100, "snapshot_date": "2026-09-28"}
+            row[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                gap.filter_snapshot(pd.DataFrame([row]), "2026-09-28", gap.PROFILES["standard"])
+
+    def test_duplicate_canonical_columns_rejected_clearly(self):
+        self.bars["日期"] = self.bars["date"]
+        with self.assertRaisesRegex(ValueError, "重复"):
+            gap.gap_values(self.bars, "2026-09-28")
 
     def test_snapshot_date_must_match(self):
         snapshot = pd.DataFrame([{"code": "000001", "name": "示例", "market_cap": 5e9,

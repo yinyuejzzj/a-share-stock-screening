@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from datetime import date, timedelta
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -45,7 +46,8 @@ def probability(value: str) -> float:
     return number
 
 
-def normalize_data(frame: pd.DataFrame, end_date: str, days: int) -> pd.DataFrame:
+def normalize_data(frame: pd.DataFrame, end_date: str, days: int,
+                   expected_code: str | None = None) -> pd.DataFrame:
     frame = frame.rename(columns={"日期": "date", "开盘": "open", "收盘": "close",
         "最高": "high", "最低": "low", "成交量": "volume", "成交额": "amount",
         "涨跌幅": "pct_change"}).copy()
@@ -53,18 +55,36 @@ def normalize_data(frame: pd.DataFrame, end_date: str, days: int) -> pd.DataFram
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"缺少列: {sorted(missing)}")
-    frame["date"] = pd.to_datetime(frame["date"], errors="raise").dt.normalize()
+    if frame.columns.duplicated().any():
+        raise ValueError("列名重复，请只保留一种中英文列名")
+    for column in ("code", "symbol", "代码", "股票代码"):
+        if column in frame:
+            codes = frame[column].astype("string").str.strip().str.replace(r"\.0$", "", regex=True).str.zfill(6)
+            if (codes.isna().any() or not codes.str.fullmatch(r"[0-9]{6}").all()
+                    or codes.nunique() != 1 or (expected_code is not None and not codes.eq(expected_code).all())):
+                raise ValueError(f"{column}列必须只含请求的单只股票代码，不能混合或错标")
+    dates = pd.to_datetime(frame["date"], errors="raise")
+    if dates.isna().any():
+        raise ValueError("交易日日期不能缺失")
+    if dates.dt.tz is not None:
+        raise ValueError("date须为不带时区的交易日日期")
+    frame["date"] = dates.dt.normalize()
     cutoff = pd.Timestamp(end_date)
     frame = frame[(frame["date"] <= cutoff) &
         (frame["date"] >= cutoff - pd.Timedelta(days=days))]
     frame = frame.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
     for column in ["open", "high", "low", "close", "volume"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    frame = frame.dropna(subset=["open", "high", "low", "close", "volume"])
+    numeric_columns = ["open", "high", "low", "close", "volume"]
+    if not np.isfinite(frame[numeric_columns].to_numpy(dtype=float)).all():
+        raise ValueError("开高低收与成交量必须为有限数值，不接受缺失、NaN或无穷值")
     if frame.empty or (frame[["open", "high", "low", "close"]] <= 0).any().any():
         raise ValueError("行情为空或包含非正价格")
     if (frame["volume"] < 0).any():
         raise ValueError("成交量不能为负")
+    if ((frame["high"] < frame[["open", "close", "low"]].max(axis=1)) |
+            (frame["low"] > frame[["open", "close", "high"]].min(axis=1))).any():
+        raise ValueError("OHLC不一致：最高价须覆盖开收低，最低价须不高于开收高")
     if "amount" not in frame:
         frame["amount"] = 0.0
     else:
@@ -91,7 +111,10 @@ def evaluate_and_predict(frame: pd.DataFrame, forward_days: int = 1,
         raise ValueError("指标与标签清理后至少需要 200 条日线，建议提供 1500 个自然日行情")
     split = int(len(labeled) * 0.8)
     # The last training label must end before validation starts.
-    training = labeled.iloc[:split - forward_days]
+    train_end = split - forward_days
+    if train_end < 100:
+        raise ValueError("预测步长过长，隔离标签后训练样本不足100条")
+    training = labeled.iloc[:train_end]
     validation = labeled.iloc[split:]
     if len(training) < 100 or len(validation) < 20 or training["label"].nunique() < 2:
         raise ValueError("训练样本/验证样本不足或训练标签只有一个类别")
@@ -142,7 +165,7 @@ def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     arguments = parser().parse_args(argv)
-    if len(arguments.code) != 6 or not arguments.code.isdigit():
+    if re.fullmatch(r"[0-9]{6}", arguments.code) is None:
         parser().error("--code 必须是6位数字")
     if not np.isfinite(arguments.return_threshold) or not 0 <= arguments.return_threshold <= 0.15:
         parser().error("--return-threshold 必须介于0和0.15之间")
@@ -150,14 +173,14 @@ def main(argv=None) -> int:
         parser().error("--end-date 不能在未来")
     try:
         if arguments.csv:
-            raw = pd.read_csv(arguments.csv)
+            raw = pd.read_csv(arguments.csv, dtype={column: str for column in ("code", "symbol", "代码", "股票代码")})
         else:
             import akshare as ak
             end = date.fromisoformat(arguments.end_date)
             raw = ak.stock_zh_a_hist(symbol=arguments.code, period="daily",
                 start_date=(end - timedelta(days=arguments.days)).strftime("%Y%m%d"),
                 end_date=end.strftime("%Y%m%d"), adjust="qfq")
-        frame = normalize_data(raw, arguments.end_date, arguments.days)
+        frame = normalize_data(raw, arguments.end_date, arguments.days, expected_code=arguments.code)
         result = evaluate_and_predict(frame, arguments.forward_days,
             arguments.return_threshold, arguments.min_probability or PROFILES[arguments.profile])
         result.update(code=arguments.code, profile=arguments.profile)

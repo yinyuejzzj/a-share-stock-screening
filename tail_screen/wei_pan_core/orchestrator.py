@@ -105,23 +105,27 @@ def _assign_sell_strategies(top5: pd.DataFrame) -> pd.DataFrame:
         close = float(row.get("close") or 0.0)
         # 计算卖出价区间
         if s == "A":
-            # 集合竞价卖出：无法预知次日竞价价，用"竞价区间=今收±2%"标注
-            sell_price_low = close * 0.98   # 最差竞价跌2%
-            sell_price_high = close * 1.02  # 最好竞价涨2%
+            # 集合竞价价未知；只显示参考基准和用户配置的阈值。
             sell_time = cfg.get("sell_time", "09:25")
-            detail = f"策略A：09:25集合竞价直接卖出（竞价价≈{sell_price_low:.2f}~{sell_price_high:.2f}，今收{close:.2f}±2%）"
+            detail = (f"策略A：{sell_time}集合竞价退出；次日竞价价格未知，今收{close:.2f}仅为参考基准；"
+                      f"止损阈值{cfg['hard_stop_loss_pct']:+.1%}，不保证按阈值成交")
             sell_price = close  # 标记基准=今收，实际以次日09:25竞价为准
         elif s == "B":
             stop = close * (1 + cfg["stop_loss_pct"])
             tp = close * (1 + cfg["take_profit_pct"])
             sell_time = f"{cfg['window_start']}~{cfg['window_end']}"
-            detail = f"策略B：止损{stop:.2f}(-1.5%) 止盈{tp:.2f}(+1.5%) 时间窗{sell_time}"
+            detail = (f"策略B：止损{stop:.2f}({cfg['stop_loss_pct']:+.1%}) "
+                      f"止盈{tp:.2f}({cfg['take_profit_pct']:+.1%}) 时间窗{sell_time}")
             sell_price = tp  # 目标卖出价
         else:  # C
             stop = close * (1 + cfg["hard_stop_loss_pct"])
             tp_fast = close * (1 + cfg["take_profit_fast_pct"])
             sell_time = cfg.get("final_close_time", "10:00")
-            detail = f"策略C：硬止损{stop:.2f}(-1.8%) 快止盈{tp_fast:.2f}(+2%) 追踪触发+1.2%/回撤0.5% 10点前平仓"
+            trailing = (f"追踪触发{cfg['trailing_trigger_pct']:+.1%}/回撤{cfg['trailing_drawdown_pct']:.1%}"
+                        if cfg.get("take_profit_trailing_on") else "追踪止盈关闭")
+            detail = (f"策略C：硬止损{stop:.2f}({cfg['hard_stop_loss_pct']:+.1%}) "
+                      f"快止盈{tp_fast:.2f}({cfg['take_profit_fast_pct']:+.1%}) {trailing} "
+                      f"{sell_time}前退出；不保证成交")
             sell_price = tp_fast
         strategies.append(s)
         sell_prices.append(round(sell_price, 2))
@@ -304,6 +308,8 @@ def run_wei_pan(
         sector_df = fetch_sector_rankings(market_close_date=date_str)
         codes = passed["code"].astype(str).str.zfill(6).tolist()
         sector_map = fetch_stock_sector_map(codes[:30])  # 限制30票防超时
+        passed = passed.copy()
+        passed["sector"] = passed["code"].astype(str).str.zfill(6).map(sector_map)
         contrib = compute_stock_contrib_rank(passed, sector_map)
 
         th = filter_report.extra

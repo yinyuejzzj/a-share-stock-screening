@@ -409,9 +409,10 @@ class StockPredictor:
         v4.0: 两步特征选择
           Step 1: RF importance top-30（防过拟合）
           Step 2: RFE 递归消除至 min(15, max(5, len//20))
-        选择后重新标准化，并更新 self.feature_cols / self.scaler，保证预测时一致。
+        选择后同步截取原标准化器参数，并更新 self.feature_cols，保证预测时一致。
         """
         n_features = len(self.feature_cols)
+        original_features = list(self.feature_cols)
 
         # Step 1: RF importance top-k
         if n_features > top_k:
@@ -457,12 +458,18 @@ class StockPredictor:
                 print(f"    特征选择 Step2: RFE 失败 ({type(e).__name__})，"
                       f"保留 Step1 结果")
 
-        # 重新标准化（仅用选中特征）
-        self.scaler = StandardScaler()
-        X_train_sel = self.scaler.fit_transform(X_train)
-        X_calib_sel = self.scaler.transform(X_calib)
-        X_test_sel = self.scaler.transform(X_test)
-        return X_train_sel, X_calib_sel, X_test_sel
+        # 输入已由 prepare_data 标准化，不能再次拟合并丢掉原始量纲。
+        # 保留所选列对应的原始均值/方差，使 predict_latest 的原始特征
+        # 与训练阶段保持同一变换。
+        selected = [original_features.index(column) for column in self.feature_cols]
+        for attribute in ("mean_", "scale_", "var_"):
+            value = getattr(self.scaler, attribute, None)
+            if value is not None:
+                setattr(self.scaler, attribute, value[selected])
+        self.scaler.n_features_in_ = len(selected)
+        if hasattr(self.scaler, "feature_names_in_"):
+            self.scaler.feature_names_in_ = self.scaler.feature_names_in_[selected]
+        return X_train, X_calib, X_test
 
     # ------------------------------------------------------------------
     # v4.0: 训练（集成网格搜索 + 三段切分 + 两步特征选择 + 加权集成 + 持久化）

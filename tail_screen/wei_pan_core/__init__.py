@@ -7,9 +7,9 @@
     global_market 外盘情绪总闸 + 大盘状态（ML权重）判定
     hard_filter  10条硬门槛过滤 + 三买入时点K系数应用
     scorer       规则打分（基础70 + 板块热度30）→ Top10
-    rerank_ml    ML辅助重排（仅Top10，弱市ML=0，审计修正归一公式）
-    strategy_A/B/C  三卖出策略次日评估
-    formatter    三格式输出（Markdown / Excel / JSON快照）
+    ml_ranker    排序模块（公开CLI固定纯规则）
+    orchestrator  编排及模拟退出条件
+    report_formatter  Markdown / HTML 报告
 """
 
 __all__ = [
@@ -17,14 +17,13 @@ __all__ = [
     "data_fetcher",
     "stock_pool",
     "global_market",
-    "sector_heat",
+    "sector_ranking",
     "hard_filter",
     "scorer",
-    "rerank_ml",
-    "strategy_A",
-    "strategy_B",
-    "strategy_C",
-    "formatter",
+    "ml_ranker",
+    "orchestrator",
+    "report_formatter",
+    "backtest_data_reconstructor",
 ]
 
 # 版本号与设计文档对齐（任何时候程序输出都要打这个版本号，便于核对审计修正）

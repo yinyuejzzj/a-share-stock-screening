@@ -35,6 +35,8 @@ def iso_date(value):
 
 def normalize(frame):
     out = frame.rename(columns=ALIASES).copy()
+    if out.columns.duplicated().any():
+        raise ValueError("列名归一化后重复，请只保留中文或英文的一组列")
     if "code" in out:
         out["code"] = out["code"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
     return out
@@ -46,6 +48,10 @@ def filter_snapshot(snapshot, target_date, params):
     required = {"code", "name", "market_cap", "pb", "volume", "snapshot_date"}
     if required - set(df):
         raise ValueError(f"快照缺列: {sorted(required - set(df))}")
+    if not df["code"].str.fullmatch(r"\d{6}").all():
+        raise ValueError("快照代码必须为6位数字")
+    if df["name"].isna().any() or df["name"].astype(str).str.strip().eq("").any():
+        raise ValueError("快照名称缺失，无法核对ST/退市过滤")
     days = pd.to_datetime(df["snapshot_date"], errors="raise").dt.strftime("%Y-%m-%d")
     if not days.eq(target_date).all():
         raise ValueError("快照日期必须全部等于 --date；拒绝混用最新估值与历史行情")
@@ -53,6 +59,8 @@ def filter_snapshot(snapshot, target_date, params):
         raise ValueError("快照每个股票代码只能有一行")
     for key in ("market_cap", "pb", "volume"):
         df[key] = pd.to_numeric(df[key], errors="coerce")
+    if not df["volume"].map(math.isfinite).all() or df["volume"].lt(0).any():
+        raise ValueError("快照成交量缺失、非有限或为负")
     cap = df["market_cap"] / 1e8
     valid = (~df["name"].astype(str).str.contains("ST|退", case=False, na=False)
              & cap.ge(params["min_market_cap_yi"]) & cap.lt(params["max_market_cap_yi"])
@@ -72,10 +80,20 @@ def gap_values(bars, target_date, min_gap_pct=0):
     df = df[df["date"] <= target_date].sort_values("date").reset_index(drop=True)
     if len(df) < 2 or df.iloc[-1]["date"] != target_date:
         return None
+    checked_columns = ["open", "high", "close"] + (["low"] if "low" in df else [])
+    for key in checked_columns:
+        df[key] = pd.to_numeric(df[key], errors="coerce")
+    if not df[checked_columns].map(lambda v: math.isfinite(v) and v > 0).all().all():
+        raise ValueError("日线价格缺失、非有限或非正")
+    if (df["high"] < df[["open", "close"]].max(axis=1)).any():
+        raise ValueError("日线最高价低于开盘或收盘价")
+    if "low" in df and ((df["low"] > df[["open", "close"]].min(axis=1)) |
+                          (df["low"] > df["high"])).any():
+        raise ValueError("日线最低价关系不成立")
     previous, current = df.iloc[-2], df.iloc[-1]
     opening, previous_high, previous_close = (float(current["open"]), float(previous["high"]), float(previous["close"]))
     if not all(math.isfinite(v) and v > 0 for v in (opening, previous_high, previous_close)):
-        return None
+        raise ValueError("参与缺口计算的价格必须为有限正数")
     if opening <= previous_high * (1 + min_gap_pct / 100):
         return None
     return {"date": target_date, "previous_date": previous["date"], "open": opening,
@@ -173,4 +191,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except (ValueError, OSError, ImportError) as exc:
+        print(f"输入或数据错误: {exc}", file=sys.stderr)
+        raise SystemExit(2)

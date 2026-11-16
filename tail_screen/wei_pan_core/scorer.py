@@ -68,10 +68,12 @@ def _score_one_base(
 
     # ① 涨停基因15分（按涨停距离分档：近20日=满15分；近30日=12分；近45日=8分；更远=5分）
     from .config import LIMITUP_GENE_SCORE_TABLE
-    gene = row.get("has_limit_up_in_N_day") or {}
-    gene_n_day_bool = bool(isinstance(gene, dict) and gene.get(limit_up_N)) or any(
-        (isinstance(k, int) and k >= limit_up_N and bool(v)) for k, v in gene.items() if isinstance(k, int)
-    )
+    raw_gene = row.get("has_limit_up_in_N_day") or {}
+    # JSON object keys become strings after a cache round-trip. Normalize once
+    # so identical observations retain identical scores on subsequent runs.
+    gene = {int(k): bool(v) for k, v in raw_gene.items()
+            if str(k).isdigit()} if isinstance(raw_gene, dict) else {}
+    gene_n_day_bool = bool(gene.get(limit_up_N, False))
     if gene_n_day_bool:
         # 按最近涨停窗口分档打分（越近涨停=含金量越高）
         if isinstance(gene, dict) and gene:

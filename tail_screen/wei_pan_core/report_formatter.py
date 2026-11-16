@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -104,6 +105,12 @@ def format_markdown(result: Dict[str, Any]) -> str:
             lines.append("- 各条件剔除数：")
             for cond, cnt in sorted(dropped.items(), key=lambda x: -x[1]):
                 lines.append(f"  - {cond}: {cnt}")
+        thresholds = fr.get("thresholds") or {}
+        if thresholds:
+            lines.extend(["", "### 本次有效阈值", "", "| 参数 | 生效值 |", "|---|---|"])
+            for key, value in thresholds.items():
+                encoded = json.dumps(value, ensure_ascii=False)
+                lines.append(f"| {key} | {encoded} |")
         lines.append("")
 
     # ML重排

@@ -9,7 +9,7 @@ python -m local_model.cli --code 000001 --days 1500 --forward-days 3 --profile s
 python -m local_model.cli --code 000001 --csv examples/daily.csv --end-date 2026-09-30 --profile strict
 ```
 
-第二条中的 CSV 路径仅示意，需提供自己的文件。最少包含 `date,open,high,low,close,volume`，可选 `amount,pct_change`；中文日线列名也可识别。文件只应含所选一只股票，代码用于标识。输入至少需要清理后200条有效且已知标签的日线，推荐1500个自然日数据。在线取数调用 AkShare；接口与访问可用性另行决定，离线测试不证明在线接口可用。
+第二条中的 CSV 路径仅示意，需提供自己的文件。最少包含 `date,open,high,low,close,volume`，可选 `amount,pct_change`；中文日线列名也可识别。文件只应含所选一只股票。若含 `code/symbol/代码/股票代码` 列，会校验其全部为单个股票且等于 `--code`；不含代码列时需使用者自行保证归属。日期须为无时区且不缺失的交易日，OHLCV须为有限数值，且最高/最低价应覆盖开收盘价。输入至少需要清理后200条有效且已知标签的日线，推荐1500个自然日数据。在线取数调用 AkShare；接口与访问可用性另行决定，离线测试不证明在线接口可用。
 
 ## 使用者可修改的参数
 
@@ -37,6 +37,8 @@ python -m local_model.cli --code 000001 --csv examples/daily.csv --end-date 2026
 ## 原模型与九条件筛选源码
 
 `experimental/predictor.py` 保留原项目的自动模型选择、集成与校准实验类；可通过 `from local_model.experimental.predictor import StockPredictor` 导入，搭配本模块指标与标签函数。随机森林以外的 XGBoost/LightGBM 是可选依赖。该源码不在默认 CLI 流程中，未完成全面时序审计，不宜直接引用其中准确率作为交易效果。
+
+原实验模型的重复标准化问题已修复：保留训练时原始特征的均值/方差，并在特征选择后同步切片，预测与训练使用同一口径。此修复不等于完成原模型的整体验证；原模型内部切分和调参尚未统一加入预测步长隔离，其准确率仍不适合充当无泄漏验证结论。
 
 `experimental/screen_stocks.py` 保留原九条件筛选源码，可从仓库根目录执行 `python -m local_model.experimental.screen_stocks --test 000001` 或 `--full`。它使用实时价格与手工配置报告期的财务数据，**不支持历史时点筛选**。参数在文件顶部直接修改，不接受上面预测 CLI 的 `--profile`。建议一次只改一类参数，记录日期与结果：
 

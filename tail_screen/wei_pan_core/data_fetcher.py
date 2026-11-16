@@ -14,6 +14,7 @@ import json
 import time
 import math
 import hashlib
+from io import StringIO
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, date as date_cls
 
@@ -49,7 +50,9 @@ def _new_session() -> "requests.Session":
 
 
 def _cache_key(keywords: Tuple[Any, ...]) -> str:
-    raw = "|".join(str(k) for k in keywords).encode("utf-8")
+    # The old schema can contain index quotes under individual-stock codes.
+    # Invalidate it rather than replaying those observations after the route fix.
+    raw = ("tail-v2|" + "|".join(str(k) for k in keywords)).encode("utf-8")
     return hashlib.md5(raw).hexdigest()
 
 
@@ -231,10 +234,12 @@ _INDEX_EXCHANGE_OVERRIDE: Dict[str, str] = {
 }
 
 
-def _tencent_market_prefix(code6: str) -> str:
-    """6位代码 → sh/sz/bj 前缀（含常见指数代码例外）"""
+def _tencent_market_prefix(code6: str, *, is_index: bool = False) -> str:
+    """6位个股代码 → sh/sz/bj；只有显式指数请求才使用指数市场映射。"""
     code6 = str(code6).strip().zfill(6)
-    if code6 in _INDEX_EXCHANGE_OVERRIDE:
+    if is_index:
+        if code6 not in _INDEX_EXCHANGE_OVERRIDE:
+            raise ValueError(f"未知指数交易所，请明确配置指数市场: {code6}")
         return _INDEX_EXCHANGE_OVERRIDE[code6] + code6
     if code6.startswith(("6", "9", "5")):
         return "sh" + code6
@@ -247,7 +252,7 @@ def _tencent_market_prefix(code6: str) -> str:
 
 def _fetch_tencent_code_list_and_info() -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
     """腾讯API没有直接"全A股代码列表"，改用 akshare 拉代码（或新浪沪深京列表URL）。
-    失败时降级为从本地已有历史票池缓存加载；最终兜底用固定测试名单。
+    列表来源失败时返回空列表，让调用方继续真实行情来源或明确失败。
     """
     list_info: Dict[str, Dict[str, Any]] = {}
 
@@ -293,11 +298,7 @@ def _fetch_tencent_code_list_and_info() -> Tuple[List[str], Dict[str, Dict[str, 
             pass
 
     if not list_info:
-        # 3) 最终兜底：已知常见测试票 + 50ETF / 300ETF等，不让整个系统因票列表拉取失败直接挂（但会把fallback标记给上层）
-        for c6 in ("600596", "603662", "000001", "000002", "300750", "601318", "000858", "600036",
-                   "002594", "688981", "600030", "601398", "601288", "601328", "000333", "600276",
-                   "000651", "000568", "600887", "601888", "600031", "000063", "300059", "000725"):
-            list_info[c6] = {"name": c6, "list_date": ""}
+        return [], {}
     codes_sorted = sorted(list_info.keys())
     return codes_sorted, list_info
 
@@ -523,15 +524,16 @@ def _augment_with_historical_columns(df: pd.DataFrame, date: str) -> pd.DataFram
 
 
 def _fetch_single_daily_k(code6: str, bars: int = 60,
-                          end_date: Optional[date_cls] = None) -> Optional[pd.DataFrame]:
+                          end_date: Optional[date_cls] = None,
+                          *, is_index: bool = False) -> Optional[pd.DataFrame]:
     """拉单票60日日线（默认sina历史；akshare兜底）。"""
     end = end_date or datetime.now().date()
-    cache_key = _cache_key(("daily_k", code6, bars, end.isoformat()))
+    cache_key = _cache_key(("daily_k", "index" if is_index else "stock", code6, bars, end.isoformat()))
     cached = _cache_read(cache_key)
     if cached is not None:
         return pd.read_json(cached, orient="split")
     # sina 历史
-    pref = _tencent_market_prefix(code6)
+    pref = _tencent_market_prefix(code6, is_index=is_index)
     s = _new_session()
     s.headers.update({"Referer": _SINA_PREFIX_REFERER})
     url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
@@ -549,10 +551,13 @@ def _fetch_single_daily_k(code6: str, bars: int = 60,
     # akshare 兜底
     try:
         import akshare as ak
-        df = ak.stock_zh_a_hist(symbol=code6, period="daily", adjust="qfq",
-                                end_date=end.strftime("%Y%m%d"))
+        if is_index:
+            df = ak.stock_zh_index_daily_em(symbol=pref, end_date=end.strftime("%Y%m%d"))
+        else:
+            df = ak.stock_zh_a_hist(symbol=code6, period="daily", adjust="qfq",
+                                   end_date=end.strftime("%Y%m%d"))
         if len(df) > 0:
-            df = df.rename(columns={"日期": "day", "开盘": "open", "最高": "high", "最低": "low",
+            df = df.rename(columns={"日期": "day", "date": "day", "开盘": "open", "最高": "high", "最低": "low",
                                      "收盘": "close", "成交量": "volume"}).tail(bars)
             df = df[["day", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
             _cache_write(cache_key, df.to_json(orient="split"))
@@ -570,7 +575,7 @@ def fetch_intraday_minute(code6: str, date: Optional[str] = None,
     """拉指定票当日（或指定日期）的5分钟线，按"截至until_minute_str"切片返回。
 
     until_minute_str 接受 "14:00" / "14:30" / "14:45" / "15:00" 四种（对应A/B/C的时间窗）。
-    返回 {"ok":bool, "data":DataFrame columns=[time_str, open, high, low, close, volume, avg_price],
+    返回 {"ok":bool, "data":DataFrame columns=[time, time_str, open, high, low, close, volume, avg_price],
            "fallback_used":[], "reason":""}
     avg_price = 截至该分钟的累计成交额/累计成交量近似（用于cond9现价与均价距离）
     """
@@ -579,7 +584,10 @@ def fetch_intraday_minute(code6: str, date: Optional[str] = None,
     cache_key = _cache_key(("intraday_minute", code6, date, until_minute_str))
     cached = _cache_read(cache_key)
     if cached is not None:
-        return {"ok": True, "data": pd.read_json(cached, orient="split"),
+        restored = pd.read_json(StringIO(cached), orient="split")
+        if "time" not in restored.columns and "time_str" in restored.columns:
+            restored["time"] = date + " " + restored["time_str"].astype(str)
+        return {"ok": True, "data": restored,
                 "fallback_used": fallback_used, "reason": "cache"}
     # 优先sina getKLineData scale=5（今天我们测稳定返回最近1-2天的5分钟）
     pref = _tencent_market_prefix(code6)
@@ -630,7 +638,8 @@ def fetch_intraday_minute(code6: str, date: Optional[str] = None,
     df["avg_price"] = np.where(df["cum_vol_shares"] > 0,
                                df["cum_amount"] / df["cum_vol_shares"],
                                df["open"].astype(float))
-    df = df[["time_str", "open", "high", "low", "close", "volume", "avg_price"]].reset_index(drop=True)
+    df["time"] = df["day"]
+    df = df[["time", "time_str", "open", "high", "low", "close", "volume", "avg_price"]].reset_index(drop=True)
     for col in ["open", "high", "low", "close", "volume", "avg_price"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     _cache_write(cache_key, df.to_json(orient="split"))
@@ -854,7 +863,8 @@ def fetch_hs300_regime_signals(regime_date: Optional[str] = None) -> Dict[str, A
         import akshare as ak
         idx = ak.stock_zh_index_daily_em(symbol="sh000300").tail(8)
         if len(idx) >= 6:
-            closes = idx["收盘"].astype(float).values
+            close_column = "close" if "close" in idx.columns else "收盘"
+            closes = idx[close_column].astype(float).values
             data["hs300_5d_return"] = float((closes[-1] - closes[-6]) / closes[-6])
             if len(closes) >= 4:
                 d3 = np.diff(closes[-4:]) < 0
@@ -868,7 +878,7 @@ def fetch_hs300_regime_signals(regime_date: Optional[str] = None) -> Dict[str, A
         errors.append(f"ak_hs300:{type(e1).__name__}")
     if not hs300_done:  # ✅ 行数不够也兜底（刚才的场景：akshare只返回3行最新交易日，也应该走sina兜底）
         try:
-            idx_df = _fetch_single_daily_k("000300", bars=10)
+            idx_df = _fetch_single_daily_k("000300", bars=10, is_index=True)
             if idx_df is not None and len(idx_df) >= 6:
                 closes = idx_df["close"].astype(float).values
                 data["hs300_5d_return"] = float((closes[-1] - closes[-6]) / closes[-6])
